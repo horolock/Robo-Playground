@@ -5,6 +5,11 @@
 #include <unistd.h>
 #include <csignal>
 
+#include <fcntl.h>
+#include <cerrno>
+#include <thread>
+#include <chrono>
+
 volatile bool g_running = true;
 
 void signal_handler(int signum) {
@@ -26,6 +31,10 @@ int main() {
         std::cerr << "Failed to create socket" << std::endl;
         return 1;
     }
+
+    // Non-Blocking mode
+    int flags = fcntl(sock, F_GETFL, 0);            // Get Current Flag
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);       // Add `O_NONBLOCK` Flag
     std::cout << "[1] Socket Created (fd=" << sock << ")" << std::endl;
 
     sockaddr_in my_addr{};
@@ -43,11 +52,12 @@ int main() {
     std::cout << "[2] Bound to port " << LISTEN_PORT << std::endl;
     std::cout << "[3] Waiting for data ... (Cmd + C to quit)" << std::endl;
 
-    // MARK: - Receive data
+    // MARK: - Non-Blocking Receive Loop
     char buffer[BUFFER_SIZE];
     sockaddr_in sender_addr{};
     socklen_t sender_addr_len;
     int message_count = 0;
+    int loop_count = 0;
 
     while (g_running) {
         sender_addr_len = sizeof(sender_addr);
@@ -61,23 +71,37 @@ int main() {
             &sender_addr_len
         );
 
-        if (received_bytes < 0) {
-            if (g_running) { std::cerr << "Receive error" << std::endl; }
-            break;
+        if (received_bytes > 0) {
+            buffer[received_bytes] = '\0';
+            message_count++;
+
+            char sender_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
+
+            std::cout << "[#" << message_count << "] " << received_bytes << " bytes from " << sender_ip << ":" << ntohs(sender_addr.sin_port) << " -> \"" << buffer << "\"" << std::endl;    
+        } else if (received_bytes < 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+
+            } else {
+                std::cerr << "Receive error: " << strerror(errno) << std::endl;
+                break;
+            }
         }
 
-        buffer[received_bytes] = '\0';
-        message_count++;
+        loop_count++;
 
-        char sender_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
+        if (loop_count % 100 == 0) {
+            std::cout << " [heartbeat] Loop Count: " << loop_count << ", Messages: " << message_count << std::endl;
+        }
 
-        std::cout << "[#" << message_count << "] " << received_bytes << " bytes from " << sender_ip << ":" << ntohs(sender_addr.sin_port) << " -> \"" << buffer << "\"" << std::endl;    
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     close(sock);
 
     std::cout << "[4] Socket closed, Total messages: " << message_count << std::endl;
+    std::cout << "      Total loops: " << loop_count << std::endl;
+    std::cout << "      Total messages: " << message_count << std::endl;
 
     return 0;
 }
